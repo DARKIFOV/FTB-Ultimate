@@ -1,0 +1,141 @@
+diff --git a/build.gradle b/build.gradle
+index 22942c6..0c6065b 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -4,7 +4,7 @@ plugins {
+ }
+ 
+ group = 'com.feed_the_beast.mods.ftbultimine'
+-version = '1.7.10-1.3.4-port.4'
++version = '1.7.10-1.3.4-port.5'
+ 
+ base {
+ 	archivesName = 'FTBUltimine'
+diff --git a/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimineConfig.java b/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimineConfig.java
+index fd308f7..66b4d95 100644
+--- a/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimineConfig.java
++++ b/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimineConfig.java
+@@ -18,6 +18,7 @@ public class FTBUltimineConfig
+ 
+ 	public static int maxBlocks = 64;
+ 	public static int dropItems = 0;
++	public static int immediateFoodCostPerUse = 1;
+ 	public static double baseExhaustionPerUse = 0.10D;
+ 	public static double exhaustionPerBlock = 6D;
+ 	public static double maxExhaustionPerUse = 1.50D;
+@@ -79,6 +80,7 @@ public class FTBUltimineConfig
+ 	{
+ 		maxBlocks = config.getInt("maxBlocks", GENERAL, 64, 1, 512, "Max blocks that can be mined at once.");
+ 		dropItems = config.getInt("dropItems", GENERAL, 0, 0, 2, "0 - Drop at position where mined block was\n1 - drop at player position\n2 - place directly in inventory");
++		immediateFoodCostPerUse = config.getInt("immediateFoodCostPerUse", GENERAL, 1, 0, 20, "Food points removed immediately once per successful multi-block Ultimine operation. 1 point is half a hunger icon. Set 0 to use exhaustion only.");
+ 		baseExhaustionPerUse = config.get(GENERAL, "baseExhaustionPerUse", 0.10D, "Small exhaustion cost charged once when an Ultimine operation successfully mines at least one block.", 0D, 4D).getDouble(0.10D);
+ 		exhaustionPerBlock = config.get(GENERAL, "exhaustionPerBlock", 6D, "Exhaustion setting per successfully mined block. The applied amount is value * 0.005.", 0D, 1000D).getDouble(6D);
+ 		maxExhaustionPerUse = config.get(GENERAL, "maxExhaustionPerUse", 1.50D, "Maximum exhaustion charged by one Ultimine operation. 0 disables the cap. Four exhaustion removes one saturation or food point.", 0D, 40D).getDouble(1.50D);
+diff --git a/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimine.java b/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimine.java
+index 09fcc35..3ed839d 100644
+--- a/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimine.java
++++ b/src/main/java/com/feed_the_beast/mods/ftbultimine/FTBUltimine.java
+@@ -27,6 +27,7 @@ import net.minecraft.entity.player.EntityPlayer;
+ import net.minecraft.entity.player.EntityPlayerMP;
+ import net.minecraft.item.ItemStack;
+ import net.minecraft.server.MinecraftServer;
++import net.minecraft.util.FoodStats;
+ import net.minecraft.util.MathHelper;
+ import net.minecraft.util.MovingObjectPosition;
+ import net.minecraft.util.Vec3;
+@@ -49,7 +50,7 @@ public class FTBUltimine
+ {
+ 	public static final String MOD_ID = "ftbultimine";
+ 	public static final String MOD_NAME = "FTB Ultimine";
+-	public static final String VERSION = "1.7.10-1.3.4-port.4";
++	public static final String VERSION = "1.7.10-1.3.4-port.5";
+ 
+ 	@Mod.Instance(MOD_ID)
+ 	public static FTBUltimine instance;
+@@ -216,6 +217,25 @@ public class FTBUltimine
+ 
+ 	// ------------------------------------------------------------- breaking
+ 
++	/** Removes an immediate, visible amount of food for a successful Ultimine use. */
++	private static void chargeImmediateFood(EntityPlayerMP player, int foodPoints)
++	{
++		if (foodPoints <= 0)
++		{
++			return;
++		}
++
++		FoodStats stats = player.getFoodStats();
++		int newFoodLevel = Math.max(0, stats.getFoodLevel() - foodPoints);
++		stats.setFoodLevel(newFoodLevel);
++
++		// Keep vanilla's invariant: saturation cannot exceed the food level.
++		if (stats.getSaturationLevel() > newFoodLevel)
++		{
++			stats.setFoodSaturationLevel(newFoodLevel);
++		}
++	}
++
+ 	@SubscribeEvent(priority = EventPriority.LOW)
+ 	public void blockBroken(BlockEvent.BreakEvent event)
+ 	{
+@@ -291,6 +311,7 @@ public class FTBUltimine
+ 		boolean hadTool = heldItem != null;
+ 		float operationExhaustion = 0F;
+ 		boolean chargedBaseExhaustion = false;
++		boolean chargedImmediateFood = false;
+ 
+ 		try
+ 		{
+@@ -319,6 +340,16 @@ public class FTBUltimine
+ 
+ 				if (!player.capabilities.isCreativeMode)
+ 				{
++					// Vanilla exhaustion is accumulated in a hidden float and only
++					// consumes saturation/food after reaching 4.0. Charge one small
++					// visible food step on the first successful multi-block harvest so
++					// the player sees the cost immediately instead of after 3-4 uses.
++					if (!chargedImmediateFood && blocks.size() > 1)
++					{
++						chargeImmediateFood(player, FTBUltimineConfig.immediateFoodCostPerUse);
++						chargedImmediateFood = true;
++					}
++
+ 					float exhaustion = HungerCost.nextCharge(
+ 						!chargedBaseExhaustion,
+ 						operationExhaustion,
+diff --git a/README.md b/README.md
+index 0118961..4ab8560 100644
+--- a/README.md
++++ b/README.md
+@@ -27,12 +27,9 @@
+ 
+ ## Расход голода
+ 
+-Ultimine использует ванильную систему истощения: сначала расходуется насыщение,
+-а затем шкала голода. По умолчанию начисляется небольшой базовый расход `0.10`
+-за успешную операцию и `0.03` за каждый реально добытый блок. Общий расход одной
+-операции ограничен `1.50` единицы истощения — это не более `0.375` пункта еды,
+-или примерно `0.19` одного значка голода после исчерпания насыщения. В творческом
+-режиме голод не расходуется. Значения можно изменить в конфигурации мода.
++При успешной многоблочной операции Ultimine по умолчанию сразу снимается `1` единица еды — половина значка. Поэтому стоимость видна уже после первой копки, даже при высоком насыщении. Дополнительно сохраняется небольшой ванильный расход истощения за реально сломанные блоки с ограничением на одну операцию. В творческом режиме стоимость не применяется.
++
++Настройки: `immediateFoodCostPerUse`, `baseExhaustionPerUse`, `exhaustionPerBlock`, `maxExhaustionPerUse`.
+ 
+ ## Формы
+ 
+diff --git a/CHANGELOG-fixes.md b/CHANGELOG-fixes.md
+index b06edef..cf65072 100644
+--- a/CHANGELOG-fixes.md
++++ b/CHANGELOG-fixes.md
+@@ -1,5 +1,11 @@
+ # Исправления редакции port.2
+ 
++## port.5
++
++- Исправлена задержка расхода голода: успешная многоблочная операция Ultimine сразу снимает 1 единицу еды (половину значка) по умолчанию.
++- Скрытый ванильный расход истощения за количество блоков сохранён и остаётся ограниченным.
++- Добавлена настройка `immediateFoodCostPerUse` (`0` отключает немедленное списание).
++
+ ## По запросу пользователя
+ 
+ - Клавиша Ultimine зарегистрирована в отдельной категории **FTB Ultimine** в
